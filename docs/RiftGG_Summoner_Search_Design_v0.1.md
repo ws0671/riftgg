@@ -1,7 +1,9 @@
 # 소환사 검색 기능 개발 설계 · v0.1
 
 작성일: 2026-11-03  
-상태: 구현 전 설계안  
+상태: 검색·프로필·랭크·수동 갱신 구현 반영, 운영 환경 검증 대기
+
+구현률: 기능별 점검표 기준 60% → 95% (19/20). [완료 항목과 남은 운영 검증](./RiftGG_Summoner_Search_Progress.md) 참조. 원래 설계 내용은 아래에 유지한다.
 기준: PRD v0.2 §3.1·3.2, 기술 설계 v0.2, `RiftGG_Design_Themes.html`
 
 ## 1. 목표와 첫 구현 범위
@@ -98,7 +100,7 @@ URL 생성은 `URLSearchParams`로 처리한다. `#`는 URL fragment로 사용�
 
 ## 4. 프론트엔드 구조
 
-현재 프로젝트는 React·TypeScript·Vite 기본 템플릿 단계다. 실제 기능 구현 시 React Router, TanStack Query, supabase-js, Zod, lucide-react를 추가한다. Zustand는 이번 기능에 필요하지 않다. 스타일은 CSS 토큰과 컴포넌트 CSS로 시작해도 되며, Tailwind 채택 시에도 동일 토큰을 유지한다.
+React Router, TanStack Query, supabase-js, Zod, lucide-react를 사용한다. Zustand는 이번 기능에 필요하지 않다. 확정 기술 사양에 따라 Tailwind CSS v4를 적용했으며 `styles/tokens.css`의 `@theme`에서 블랙 테마를 관리한다.
 
 ```text
 src/
@@ -114,10 +116,11 @@ src/
       RankCard.tsx
       SummonerSkeleton.tsx
       SummonerError.tsx
-    api/searchSummoner.ts
+      SummonerRefreshButton.tsx
+      SummonerWarnings.tsx
+    api.ts
     hooks/useSummoner.ts
-    model/riotId.ts        # parse / normalize / URL builder
-    model/types.ts
+    riotId.ts              # parse / normalize / URL builder
   lib/supabase.ts
   styles/tokens.css
 supabase/
@@ -127,6 +130,8 @@ supabase/
     summoner-search/index.ts
     _shared/              # Riot client, validation, errors, cache, contracts
 ```
+
+공통 요청·응답 타입은 `supabase/functions/_shared/contracts.ts`, 서버 저장소 인터페이스는 `summoner-search/store.ts`에서 관리한다.
 
 - Query key: `['summoner', 'kr', normalizedGameName, normalizedTagLine]`. Riot의 대소문자 비교 규칙을 확인하기 전에는 이름을 임의로 소문자화하지 않는다.
 - `staleTime`은 최대 60초를 초기값으로 삼고 서버 캐시의 남은 유효 시간을 상한으로 적용한다. 창 포커스 복귀 시 자동 재조회는 초기에는 끈다.
@@ -318,7 +323,7 @@ Riot 401/403은 운영 키·권한 오류로 기록하며 사용자에게 로그
 - DB: 랭크 빈 배열 교체, 동시 요청 중복 억제, 수동 갱신 쿨다운, 리스 만료, 권한, DB 장애 시 외부 호출 차단.
 - E2E: 검색→URL→실제 데이터, 공유 URL 직접 접속·새로고침·뒤로 가기, A 검색 직후 B 검색, 모바일, 연속 갱신. CI에서는 fixture를 쓰고 실제 키 연결 검증은 명시적인 별도 검사로 실행한다.
 
-현재 설계 단계에서는 앱 코드·의존성·외부 리소스를 변경하지 않는다. Supabase 프로젝트 생성·Secrets 설정·DB 변경·API 연결은 이후 구현 단계에서 수행한다.
+현재 구현과 검증 결과는 연결된 구현률 점검 문서를 기준으로 확인한다. 로컬 DB와 실제 Riot 연동 검증은 완료했으며, 운영 프로젝트의 배포와 환경 검증은 별도 단계다.
 
 ## 11. 참조
 

@@ -1,16 +1,19 @@
-import { z } from 'zod'
-import { searchInputSchema, searchResponseSchema } from '../_shared/contracts.ts'
-import type { SearchResponse } from '../_shared/contracts.ts'
+import {
+  searchRequestSchema,
+  searchResponseSchema,
+} from '../_shared/contracts.ts'
+import type { Ranks, SearchResponse } from '../_shared/contracts.ts'
+import { ApiFailure } from '../_shared/errors.ts'
+import {
+  accountSchema,
+  profileSchema,
+  leagueSchema,
+  createRiotClient,
+} from '../_shared/riot.ts'
+import { emptyRanks } from './store.ts'
+import type { Account, CachedSummoner, Profile, SearchStore } from './store.ts'
+export type { SearchStore } from './store.ts'
 
-type Snapshot = Omit<SearchResponse, 'meta'> & { updatedAt: string; expiresAt: string }
-export interface SearchStore {
-  consume(key: string, maximum: number, seconds: number): Promise<number>
-  read(key: string): Promise<Snapshot | null>
-  claim(key: string, owner: string): Promise<boolean>
-  save(key: string, owner: string, snapshot: Snapshot): Promise<void>
-  release(key: string, owner: string): Promise<void>
-  blockRiot(seconds: number): Promise<void>
-}
 export interface Dependencies {
   store: SearchStore
   riotKey: string
@@ -18,113 +21,410 @@ export interface Dependencies {
   dataDragonVersion?: string
   fetcher?: typeof fetch
   now?: () => number
-  log?: (event: { requestId: string; code: string }) => void
+  clientIdentity?: (request: Request) => Promise<string | null>
+  log?: (event: {
+    requestId: string
+    code: string
+    upstreamStatus?: number
+  }) => void
 }
-class ApiFailure extends Error {
-  status: number
-  code: string
-  retryAfter: number
-  constructor(status: number, code: string, retryAfter = 0) { super(code); this.status = status; this.code = code; this.retryAfter = retryAfter }
+const TTL = 300_000,
+  STALE_MAX = 30 * 60_000
+const temporary = (error: unknown): error is ApiFailure =>
+  error instanceof ApiFailure &&
+  ['UPSTREAM_TIMEOUT', 'UPSTREAM_UNAVAILABLE', 'RIOT_RATE_LIMITED'].includes(
+    error.code,
+  )
+const iso = (time: number) => new Date(time).toISOString()
+async function digest(value: string) {
+  const hash = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  )
+  return Array.from(new Uint8Array(hash), (n) =>
+    n.toString(16).padStart(2, '0'),
+  ).join('')
 }
-const accountSchema = z.object({ puuid: z.string().min(1), gameName: z.string().min(1), tagLine: z.string().min(1) })
-const profileSchema = z.object({ profileIconId: z.number().int().nonnegative(), summonerLevel: z.number().int().nonnegative() })
-
 async function readBody(request: Request) {
   const reader = request.body?.getReader()
   if (!reader) throw new ApiFailure(400, 'INVALID_RIOT_ID')
-  const chunks: Uint8Array[] = []; let length = 0
+  const chunks: Uint8Array[] = []
+  let length = 0
   while (true) {
     const chunk = await reader.read()
     if (chunk.done) break
     length += chunk.value.byteLength
-    if (length > 2048) { await reader.cancel(); throw new ApiFailure(413, 'BODY_TOO_LARGE') }
+    if (length > 2048) {
+      await reader.cancel()
+      throw new ApiFailure(413, 'BODY_TOO_LARGE')
+    }
     chunks.push(chunk.value)
   }
-  const bytes = new Uint8Array(length); let offset = 0
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-  try { return JSON.parse(new TextDecoder().decode(bytes)) } catch { throw new ApiFailure(400, 'INVALID_RIOT_ID') }
+  const bytes = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes))
+  } catch {
+    throw new ApiFailure(400, 'INVALID_RIOT_ID')
+  }
 }
 
 export function createSearchHandler(deps: Dependencies) {
   return async (request: Request): Promise<Response> => {
-    const requestId = crypto.randomUUID()
+    const requestId = crypto.randomUUID(),
+      now = deps.now ?? Date.now
+    const log = (code: string, upstreamStatus?: number) =>
+      deps.log?.({
+        requestId,
+        code,
+        ...(upstreamStatus ? { upstreamStatus } : {}),
+      })
     const origin = request.headers.get('Origin')
-    const headers = new Headers({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'Origin' })
+    const headers = new Headers({
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      Vary: 'Origin',
+    })
     if (origin && deps.origins.includes(origin)) {
       headers.set('Access-Control-Allow-Origin', origin)
       headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS')
-      headers.set('Access-Control-Allow-Headers', 'content-type, apikey, authorization, x-client-info')
+      headers.set(
+        'Access-Control-Allow-Headers',
+        'content-type, apikey, authorization, x-client-info',
+      )
       headers.set('Access-Control-Expose-Headers', 'Retry-After')
     }
-    function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers }) }
-    let lease: { key: string; owner: string } | undefined
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers })
+    const leases: string[] = [],
+      warnings: string[] = []
+    const fresh = (expiry: string | null | undefined) =>
+      Boolean(expiry && Date.parse(expiry) > now())
+    const recent = (updated: string | null | undefined) =>
+      Boolean(
+        updated &&
+        now() - Date.parse(updated) <= STALE_MAX &&
+        Date.parse(updated) <= now(),
+      )
+    let retryAfter: number | undefined
+    const rankFallback = (ranks: Ranks) => {
+      if (ranks.status === 'ready' && recent(ranks.updatedAt)) {
+        if (!fresh(ranks.expiresAt)) warnings.push('RANK_STALE')
+        return ranks
+      }
+      warnings.push('RANK_UNAVAILABLE')
+      return emptyRanks()
+    }
+    function reply(
+      profile: Profile,
+      ranks: Ranks,
+      account: Account,
+      source: SearchResponse['meta']['source'],
+      allowedAt: string,
+    ) {
+      const version = deps.dataDragonVersion
+      return json(
+        searchResponseSchema.parse({
+          data: {
+            ...account,
+            platform: 'kr',
+            profileIconId: profile.profileIconId,
+            summonerLevel: profile.summonerLevel,
+            profileIconUrl:
+              version && /^\d+\.\d+\.\d+$/.test(version)
+                ? `https://ddragon.leagueoflegends.com/cdn/${version}/img/profileicon/${profile.profileIconId}.png`
+                : null,
+            ranks,
+          },
+          meta: {
+            source,
+            updatedAt: profile.updatedAt,
+            expiresAt: profile.expiresAt,
+            refreshAllowedAt: allowedAt,
+            requestId,
+            warningCodes: [...new Set(warnings)],
+            ...(retryAfter ? { retryAfterSeconds: retryAfter } : {}),
+          },
+        }),
+      )
+    }
+    async function claim(key: string) {
+      if (!(await deps.store.claim(key, requestId))) return false
+      leases.push(key)
+      return true
+    }
     try {
-      if (origin && !deps.origins.includes(origin)) throw new ApiFailure(403, 'ORIGIN_NOT_ALLOWED')
-      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers })
-      if (request.method !== 'POST') { headers.set('Allow', 'POST, OPTIONS'); throw new ApiFailure(405, 'METHOD_NOT_ALLOWED') }
-      if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('application/json')) throw new ApiFailure(415, 'UNSUPPORTED_MEDIA_TYPE')
+      if (origin && !deps.origins.includes(origin))
+        throw new ApiFailure(403, 'ORIGIN_NOT_ALLOWED')
+      if (request.method === 'OPTIONS')
+        return new Response(null, { status: 204, headers })
+      if (request.method !== 'POST') {
+        headers.set('Allow', 'POST, OPTIONS')
+        throw new ApiFailure(405, 'METHOD_NOT_ALLOWED')
+      }
+      if (
+        !request.headers
+          .get('Content-Type')
+          ?.toLowerCase()
+          .startsWith('application/json')
+      )
+        throw new ApiFailure(415, 'UNSUPPORTED_MEDIA_TYPE')
       const body = await readBody(request)
-      if (body && typeof body === 'object' && 'platform' in body && body.platform !== 'kr') throw new ApiFailure(400, 'UNSUPPORTED_PLATFORM')
-      const parsed = searchInputSchema.safeParse(body)
+      if (
+        body &&
+        typeof body === 'object' &&
+        'platform' in body &&
+        body.platform !== 'kr'
+      )
+        throw new ApiFailure(400, 'UNSUPPORTED_PLATFORM')
+      const parsed = searchRequestSchema.safeParse(body)
       if (!parsed.success) throw new ApiFailure(400, 'INVALID_RIOT_ID')
-      if (!deps.riotKey) throw new ApiFailure(503, 'SERVICE_UNAVAILABLE')
-      const input = parsed.data
-      const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(input)))
-      const key = Array.from(new Uint8Array(hash), n => n.toString(16).padStart(2, '0')).join('')
-      async function consume(scope: string, maximum: number, seconds: number, code = 'SEARCH_RATE_LIMITED') {
+      const { forceRefresh, ...input } = parsed.data
+      const key = await digest(JSON.stringify(input))
+      async function consume(scope: string, maximum: number, seconds: number) {
         const wait = await deps.store.consume(scope, maximum, seconds)
-        if (wait > 0) throw new ApiFailure(429, code, wait)
+        if (wait > 0) throw new ApiFailure(429, 'SEARCH_RATE_LIMITED', wait)
       }
       await consume('search:global', 120, 60)
       await consume(`search:${key}`, 12, 60)
-      const now = deps.now ?? Date.now
-      const cached = await deps.store.read(key)
-      if (cached && Date.parse(cached.expiresAt) > now()) {
-        return json(searchResponseSchema.parse({ data: cached.data, meta: { source: 'cache', updatedAt: cached.updatedAt, expiresAt: cached.expiresAt, requestId } }))
+      const client = await deps.clientIdentity?.(request)
+      if (client) await consume(`client:${client}`, 30, 60)
+      if (!deps.riotKey) throw new ApiFailure(503, 'SERVICE_UNAVAILABLE')
+      const riot = createRiotClient({
+        store: deps.store,
+        key: deps.riotKey,
+        fetcher: deps.fetcher,
+        deadline: AbortSignal.timeout(10_000),
+        log,
+      })
+      let identity = await deps.store.lookup(key)
+      // A fresh lookup can reject a repeated manual refresh before spending ACCOUNT quota.
+      if (forceRefresh && identity && fresh(identity.expiresAt)) {
+        const previous = await deps.store.read(identity.puuid)
+        if (fresh(previous.refreshAllowedAt))
+          throw new ApiFailure(
+            429,
+            'REFRESH_COOLDOWN',
+            Math.max(
+              1,
+              Math.ceil((Date.parse(previous.refreshAllowedAt) - now()) / 1000),
+            ),
+          )
       }
-      if (!await deps.store.claim(key, requestId)) throw new ApiFailure(409, 'REFRESH_IN_PROGRESS', 2)
-      lease = { key, owner: requestId }
-      // Each outbound request reserves shared quota; cache hits do not consume Riot quota.
-      const deadline = AbortSignal.timeout(10_000)
-      async function riot(path: string, notFound: string) {
-        await consume('riot:second', 8, 1, 'RIOT_RATE_LIMITED')
-        await consume('riot:window', 30, 120, 'RIOT_RATE_LIMITED')
-        let response: Response
+      if (forceRefresh || !identity || !fresh(identity.expiresAt)) {
+        if (!(await claim(`identity:${key}`)))
+          throw new ApiFailure(409, 'REFRESH_IN_PROGRESS', 2)
+        const latest = await deps.store.lookup(key)
+        if (!forceRefresh && latest && fresh(latest.expiresAt))
+          identity = latest
+        else {
+          const account = accountSchema.safeParse(
+            await riot(
+              { route: 'asia', method: 'account' },
+              `/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(input.gameName)}/${encodeURIComponent(input.tagLine)}`,
+              'ACCOUNT_NOT_FOUND',
+            ),
+          )
+          if (!account.success)
+            throw new ApiFailure(503, 'UPSTREAM_INVALID_RESPONSE')
+          identity = { ...account.data, expiresAt: iso(now() + TTL) }
+          try {
+            await deps.store.saveIdentity(key, requestId, identity)
+          } catch {
+            warnings.push('CACHE_WRITE_FAILED')
+            log('CACHE_WRITE_FAILED')
+          }
+        }
+      }
+      // Identity is fresh or verified by ACCOUNT during this request. Expired aliases never bypass ACCOUNT.
+      const account: Account = {
+        puuid: identity.puuid,
+        gameName: identity.gameName,
+        tagLine: identity.tagLine,
+      }
+      let cached: CachedSummoner = await deps.store.read(account.puuid)
+      if (
+        !forceRefresh &&
+        cached.profile &&
+        fresh(cached.profile.expiresAt) &&
+        cached.ranks.status === 'ready' &&
+        fresh(cached.ranks.expiresAt)
+      )
+        return reply(
+          cached.profile,
+          cached.ranks,
+          account,
+          'cache',
+          cached.refreshAllowedAt,
+        )
+      if (!(await claim(`summoner:${account.puuid}`))) {
+        if (cached.profile && recent(cached.profile.updatedAt)) {
+          warnings.push('REFRESH_IN_PROGRESS')
+          retryAfter = 2
+          const ranks = rankFallback(cached.ranks)
+          return reply(
+            cached.profile,
+            ranks,
+            account,
+            fresh(cached.profile.expiresAt) && !warnings.includes('RANK_STALE')
+              ? 'cache'
+              : 'stale',
+            cached.refreshAllowedAt,
+          )
+        }
+        throw new ApiFailure(409, 'REFRESH_IN_PROGRESS', 2)
+      }
+      // Re-read after acquiring the lease: another worker may have just committed its result.
+      cached = await deps.store.read(account.puuid)
+      if (
+        !forceRefresh &&
+        cached.profile &&
+        fresh(cached.profile.expiresAt) &&
+        cached.ranks.status === 'ready' &&
+        fresh(cached.ranks.expiresAt)
+      )
+        return reply(
+          cached.profile,
+          cached.ranks,
+          account,
+          'cache',
+          cached.refreshAllowedAt,
+        )
+      let allowedAt = cached.refreshAllowedAt
+      if (forceRefresh) {
+        const wait = await deps.store.reserveRefresh(account.puuid, requestId)
+        if (wait > 0) throw new ApiFailure(429, 'REFRESH_COOLDOWN', wait)
+        allowedAt = iso(now() + 60_000)
+      }
+      let profile = cached.profile,
+        profileToSave: Profile | null = null,
+        ranksToSave: Ranks | null = null
+      if (forceRefresh || !profile || !fresh(profile.expiresAt)) {
         try {
-          response = await (deps.fetcher ?? fetch)(path, { headers: { 'X-Riot-Token': deps.riotKey }, signal: AbortSignal.any([deadline, AbortSignal.timeout(3500)]) })
+          const result = profileSchema.safeParse(
+            await riot(
+              { route: 'kr', method: 'profile' },
+              `/lol/summoner/v4/summoners/by-puuid/${encodeURIComponent(account.puuid)}`,
+              'KR_PROFILE_NOT_FOUND',
+            ),
+          )
+          if (!result.success)
+            throw new ApiFailure(503, 'UPSTREAM_INVALID_RESPONSE')
+          profile = profileToSave = {
+            ...account,
+            ...result.data,
+            updatedAt: iso(now()),
+            expiresAt: iso(now() + TTL),
+          }
+          allowedAt = iso(Math.max(Date.parse(allowedAt), now() + 60_000))
         } catch (error) {
-          if (deadline.aborted || (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name))) throw new ApiFailure(504, 'UPSTREAM_TIMEOUT')
-          throw new ApiFailure(503, 'UPSTREAM_UNAVAILABLE')
+          if (!temporary(error) || !profile || !recent(profile.updatedAt))
+            throw error
+          warnings.push('PROFILE_STALE')
+          retryAfter = error.retryAfter || undefined
+          return reply(
+            profile,
+            rankFallback(cached.ranks),
+            account,
+            'stale',
+            allowedAt,
+          )
         }
-        if (response.status === 404) throw new ApiFailure(404, notFound)
-        if (response.status === 429) {
-          const raw = Number(response.headers.get('Retry-After'))
-          const wait = Number.isFinite(raw) && raw > 0 ? Math.ceil(raw) : 120
-          await deps.store.blockRiot(wait)
-          throw new ApiFailure(429, 'RIOT_RATE_LIMITED', wait)
+      }
+      let ranks = cached.ranks
+      if (forceRefresh || ranks.status !== 'ready' || !fresh(ranks.expiresAt)) {
+        try {
+          const result = leagueSchema.safeParse(
+            await riot(
+              { route: 'kr', method: 'ranks' },
+              `/lol/league/v4/entries/by-puuid/${encodeURIComponent(account.puuid)}`,
+              'RANK_NOT_FOUND',
+            ),
+          )
+          if (!result.success)
+            throw new ApiFailure(503, 'UPSTREAM_INVALID_RESPONSE')
+          const rank = (queue: string) => {
+            const row = result.data.find((entry) => entry.queueType === queue)
+            return row
+              ? {
+                  tier: row.tier,
+                  division: ['MASTER', 'GRANDMASTER', 'CHALLENGER'].includes(
+                    row.tier,
+                  )
+                    ? null
+                    : (row.rank ?? null),
+                  lp: row.leaguePoints,
+                  wins: row.wins,
+                  losses: row.losses,
+                }
+              : null
+          }
+          ranks = ranksToSave = {
+            status: 'ready',
+            solo: rank('RANKED_SOLO_5x5'),
+            flex: rank('RANKED_FLEX_SR'),
+            updatedAt: iso(now()),
+            expiresAt: iso(now() + TTL),
+          }
+        } catch (error) {
+          if (!(error instanceof ApiFailure)) throw error // shared DB/limiter failure is not an upstream partial success
+          warnings.push('RANK_UNAVAILABLE')
+          log(error.code)
+          retryAfter = error.retryAfter || undefined
+          ranks = rankFallback(cached.ranks)
         }
-        if (!response.ok) throw new ApiFailure(503, 'UPSTREAM_UNAVAILABLE')
-        try { return await response.json() } catch { throw new ApiFailure(503, 'UPSTREAM_INVALID_RESPONSE') }
       }
-      const account = accountSchema.safeParse(await riot(`https://asia.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(input.gameName)}/${encodeURIComponent(input.tagLine)}`, 'ACCOUNT_NOT_FOUND'))
-      if (!account.success) throw new ApiFailure(503, 'UPSTREAM_INVALID_RESPONSE')
-      const profile = profileSchema.safeParse(await riot(`https://kr.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/${encodeURIComponent(account.data.puuid)}`, 'KR_PROFILE_NOT_FOUND'))
-      if (!profile.success) throw new ApiFailure(503, 'UPSTREAM_INVALID_RESPONSE')
-      const version = deps.dataDragonVersion
-      const snapshot: Snapshot = {
-        data: { ...account.data, ...profile.data, platform: 'kr', profileIconUrl: version && /^\d+\.\d+\.\d+$/.test(version) ? `https://ddragon.leagueoflegends.com/cdn/${version}/img/profileicon/${profile.data.profileIconId}.png` : null },
-        updatedAt: new Date(now()).toISOString(), expiresAt: new Date(now() + 300_000).toISOString(),
+      if (!profile) throw new ApiFailure(503, 'SERVICE_UNAVAILABLE')
+      if (profileToSave || ranksToSave) {
+        try {
+          await deps.store.save(
+            account.puuid,
+            requestId,
+            profileToSave,
+            ranksToSave,
+          )
+        } catch {
+          warnings.push('CACHE_WRITE_FAILED')
+          log('CACHE_WRITE_FAILED')
+        }
       }
-      const result = searchResponseSchema.parse({ data: snapshot.data, meta: { source: 'riot', updatedAt: snapshot.updatedAt, expiresAt: snapshot.expiresAt, requestId } })
-      await deps.store.save(key, requestId, snapshot)
-      return json(result)
+      return reply(
+        profile,
+        ranks,
+        account,
+        warnings.includes('RANK_STALE') ? 'stale' : 'riot',
+        allowedAt,
+      )
     } catch (error) {
-      const failure = error instanceof ApiFailure ? error : new ApiFailure(503, 'SERVICE_UNAVAILABLE')
-      deps.log?.({ requestId, code: failure.code })
-      if (failure.retryAfter) headers.set('Retry-After', String(failure.retryAfter))
-      return json({ error: { code: failure.code, message: '검색 요청을 처리하지 못했습니다.', requestId, ...(failure.retryAfter ? { retryAfterSeconds: failure.retryAfter } : {}) } }, failure.status)
+      const failure =
+        error instanceof ApiFailure
+          ? error
+          : new ApiFailure(503, 'SERVICE_UNAVAILABLE')
+      log(failure.code)
+      if (failure.retryAfter)
+        headers.set('Retry-After', String(failure.retryAfter))
+      return json(
+        {
+          error: {
+            code: failure.code,
+            message: '검색 요청을 처리하지 못했습니다.',
+            requestId,
+            ...(failure.retryAfter
+              ? { retryAfterSeconds: failure.retryAfter }
+              : {}),
+          },
+        },
+        failure.status,
+      )
     } finally {
-      if (lease) await deps.store.release(lease.key, lease.owner).catch(() => { deps.log?.({ requestId, code: 'LEASE_RELEASE_FAILED' }) })
+      for (const key of leases.reverse())
+        await deps.store
+          .release(key, requestId)
+          .catch(() => log('LEASE_RELEASE_FAILED'))
     }
   }
 }

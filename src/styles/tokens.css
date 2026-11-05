@@ -1,1 +1,23 @@
-:root { --background: #0b0c0e; --surface: #111316; --surface-muted: #191c21; --text: #f0f1f4; --text-muted: #969daa; --border: #25292f; --accent: #8b9aff; --accent-text: #0b0c0e; --error: #ef9ca7; }
+/* Tailwind v4 theme: these tokens generate bg-*, text-*, and border-* utilities. */
+@theme {
+  --font-sans: Inter, 'Segoe UI', 'Malgun Gothic', sans-serif;
+  /* Keep spacing in pixels so the existing 14px base font does not change layout. */
+  --spacing: 4px;
+
+  --color-background: #0b0c0e;
+  --color-surface: #111316;
+  --color-surface-muted: #191c21;
+  --color-content: #f0f1f4;
+  --color-content-muted: #969daa;
+  --color-border: #25292f;
+  --color-accent: #8b9aff;
+  --color-accent-foreground: #0b0c0e;
+  --color-danger: #ef9ca7;
+
+  --animate-skeleton: skeleton-pulse 1.6s ease-in-out infinite alternate;
+  @keyframes skeleton-pulse {
+    to {
+      opacity: 0.4;
+    }
+  }
+}
