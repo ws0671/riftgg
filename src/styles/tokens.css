@@ -15,6 +15,13 @@
   --color-danger: #ef9ca7;
 
   --animate-skeleton: skeleton-pulse 1.6s ease-in-out infinite alternate;
+  --animate-match-detail-in: match-detail-in 180ms ease-out;
+
+  @keyframes match-detail-in {
+    from {
+      opacity: 0;
+    }
+  }
   @keyframes skeleton-pulse {
     to {
       opacity: 0.4;

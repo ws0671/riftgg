@@ -34,6 +34,18 @@ beforeAll(async () => {
       'utf8',
     ),
   )
+  await db.exec(
+    await readFile(
+      new URL('../supabase/migrations/202611030004_summoner_matches.sql', import.meta.url),
+      'utf8',
+    ),
+  )
+  await db.exec(
+    await readFile(
+      new URL('../supabase/migrations/202611030005_match_detail.sql', import.meta.url),
+      'utf8',
+    ),
+  )
 })
 afterAll(() => db.close())
 const rankedOwner = '10000000-0000-0000-0000-000000000001'
@@ -401,4 +413,35 @@ describe('normalized ranked search database', () => {
       }
     },
   )
+})
+
+
+it('keeps the match cache private and removes expired rows', async () => {
+  const permissions = await db.query<{ anon: boolean; authenticated: boolean; service: boolean }>(
+    `select has_table_privilege('anon', 'public.summoner_match_cache', 'SELECT') as anon,
+      has_table_privilege('authenticated', 'public.summoner_match_cache', 'INSERT') as authenticated,
+      has_table_privilege('service_role', 'public.summoner_match_cache', 'INSERT') as service`,
+  )
+  expect(permissions.rows[0]).toEqual({ anon: false, authenticated: false, service: true })
+  await db.exec(`
+    insert into public.summoner_match_cache values
+      ('player', 'KR_1', '{}', now() - interval '1 day'),
+      ('player', 'KR_2', '{}', now() + interval '1 day');
+    select public.cleanup_summoner_matches();
+  `)
+  expect((await db.query('select match_id from public.summoner_match_cache')).rows).toEqual([
+    { match_id: 'KR_2' },
+  ])
+})
+
+
+it('keeps cached team details private and includes them in match cleanup', async () => {
+  expect((await db.query(`
+    select has_table_privilege('anon', 'public.match_detail_cache', 'SELECT') as readable
+  `)).rows).toEqual([{ readable: false }])
+  await db.exec(`
+    insert into public.match_detail_cache values ('KR_1', '{}', now() - interval '1 day');
+    select public.cleanup_summoner_matches();
+  `)
+  expect((await db.query('select match_id from public.match_detail_cache')).rows).toEqual([])
 })

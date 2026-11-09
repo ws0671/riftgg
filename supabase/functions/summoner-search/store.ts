@@ -15,7 +15,7 @@ export type CachedSummoner = {
 }
 export type RiotScope = {
   route: 'asia' | 'kr'
-  method: 'account' | 'profile' | 'ranks'
+  method: 'account' | 'profile' | 'ranks' | 'match-list' | 'match-detail'
 }
 export type RiotBudget = {
   scope: string

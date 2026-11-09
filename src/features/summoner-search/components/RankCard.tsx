@@ -1,3 +1,5 @@
+import { Shield } from 'lucide-react'
+import { useState } from 'react'
 import type { Rank } from '../../../../supabase/functions/_shared/contracts'
 
 const tierNames: Record<string, string> = {
@@ -12,6 +14,7 @@ const tierNames: Record<string, string> = {
   GRANDMASTER: '그랜드마스터',
   CHALLENGER: '챌린저',
 }
+
 export default function RankCard({
   title,
   rank,
@@ -23,13 +26,17 @@ export default function RankCard({
   unavailable: boolean
   updatedAt: string | null
 }) {
+  const [failedEmblem, setFailedEmblem] = useState<string>()
+  const tier = rank?.tier.toUpperCase()
+  const knownTier = tier && Object.hasOwn(tierNames, tier) ? tier : undefined
+  const emblem = knownTier && `${import.meta.env.BASE_URL}rank-emblems/${knownTier.toLowerCase()}.png`
   const games = rank ? rank.wins + rank.losses : 0
   return (
     <section
       className="min-w-0 rounded-[12px] border border-border bg-surface p-[18px] max-[540px]:p-3"
       aria-label={title}
     >
-      <h3 className="mb-4 text-[12px] font-medium text-content-muted">
+      <h3 className="mb-3 text-[12px] font-semibold text-content-muted">
         {title}
       </h3>
       {unavailable ? (
@@ -38,16 +45,27 @@ export default function RankCard({
         </p>
       ) : rank ? (
         <>
-          <div className="flex items-center gap-[11px] max-[540px]:flex-wrap">
+          <div className="flex flex-wrap items-center gap-3">
             <div
-              className="grid size-11 shrink-0 place-items-center rounded-[10px] bg-surface-muted text-[20px] font-bold text-accent"
+              className="grid size-16 shrink-0 place-items-center rounded-[12px] bg-surface-muted text-content-muted max-[540px]:size-12"
               aria-hidden="true"
             >
-              {rank.tier[0]}
+              {emblem && failedEmblem !== emblem ? (
+                <img
+                  src={emblem}
+                  alt=""
+                  width={64}
+                  height={64}
+                  className="size-full object-contain"
+                  onError={() => setFailedEmblem(emblem)}
+                />
+              ) : (
+                <Shield size={24} />
+              )}
             </div>
             <div className="min-w-0">
               <p className="text-[16px] font-semibold [overflow-wrap:anywhere]">
-                {tierNames[rank.tier] ?? rank.tier} {rank.division}
+                {knownTier ? tierNames[knownTier] : rank.tier} {rank.division}
               </p>
               <p className="text-[12px] text-content-muted">{rank.lp} LP</p>
             </div>

@@ -1,27 +1,10 @@
-import { createClient } from '@supabase/supabase-js'
+import { db, rpc, serviceStore } from '../_shared/serviceStore.ts'
 import { createSearchHandler } from './handler.ts'
 import type { SearchStore } from './store.ts'
 import { createClientIdentity } from '../_shared/clientIdentity.ts'
 
-const db = createClient(
-  Deno.env.get('SUPABASE_URL') ?? '',
-  Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
-  { auth: { persistSession: false, autoRefreshToken: false } },
-)
-async function rpc(name: string, args: Record<string, unknown> = {}) {
-  const { data, error } = await db.rpc(name, args)
-  if (error) throw new Error('Database operation failed')
-  return data
-}
 const store: SearchStore = {
-  consume: async (key, maximum, seconds) =>
-    Number(
-      await rpc('consume_search_limit', {
-        p_key: key,
-        p_max: maximum,
-        p_seconds: seconds,
-      }),
-    ),
+  ...serviceStore,
   lookup: async (key) => {
     const { data, error } = await db
       .from('riot_id_lookup_cache')
@@ -69,19 +52,6 @@ const store: SearchStore = {
     Number(
       await rpc('reserve_summoner_refresh', { p_puuid: puuid, p_owner: owner }),
     ),
-  reserveRiot: async (scope) =>
-    Number(
-      await rpc('reserve_riot_call', {
-        p_route: scope.route,
-        p_method: scope.method,
-      }),
-    ),
-  observeRiot: async (budgets) => {
-    await rpc('observe_riot_limits', { p_budgets: budgets })
-  },
-  blockRiot: async (scope, seconds) => {
-    await rpc('block_riot_scope', { p_scope: scope, p_seconds: seconds })
-  },
 }
 Deno.serve(
   createSearchHandler({

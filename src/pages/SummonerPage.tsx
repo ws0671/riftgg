@@ -21,6 +21,7 @@ import SummonerError from '../features/summoner-search/components/SummonerError'
 import RankCard from '../features/summoner-search/components/RankCard'
 import SummonerRefreshButton from '../features/summoner-search/components/SummonerRefreshButton'
 import SummonerWarnings from '../features/summoner-search/components/SummonerWarnings'
+import RecentMatches from '../features/summoner-matches/RecentMatches'
 
 function SummonerResult({
   input,
@@ -124,7 +125,7 @@ function SummonerResult({
             ref={heading}
             tabIndex={-1}
           >
-            소환사 검색
+            소환사 프로필
           </h1>
         </div>
         <SummonerSearchForm
@@ -135,7 +136,7 @@ function SummonerResult({
       </div>
       <div className="mb-4 flex items-center justify-between max-[540px]:flex-col max-[540px]:items-start max-[540px]:gap-3">
         <span className="text-[10px] tracking-[2px] text-content-muted">
-          SEARCH RESULT
+          검색 결과
         </span>
         <div className="flex flex-wrap justify-end gap-2 max-[540px]:self-end">
           {query.data && (
@@ -174,41 +175,35 @@ function SummonerResult({
               codes={query.data.meta.warningCodes}
               error={refreshError}
             />
-            <div className="grid grid-cols-[222px_minmax(0,1fr)] items-start gap-6 max-[760px]:grid-cols-[190px_minmax(0,1fr)] max-[540px]:grid-cols-1">
-              <aside
-                className="grid gap-[14px] max-[540px]:grid-cols-2"
-                aria-label="랭크 정보"
-              >
-                <RankCard
-                  title="솔로 랭크"
-                  rank={query.data.data.ranks.solo}
-                  unavailable={query.data.data.ranks.status === 'unavailable'}
-                  updatedAt={query.data.data.ranks.updatedAt}
-                />
-                <RankCard
-                  title="자유 랭크"
-                  rank={query.data.data.ranks.flex}
-                  unavailable={query.data.data.ranks.status === 'unavailable'}
-                  updatedAt={query.data.data.ranks.updatedAt}
-                />
-              </aside>
-              <div className="min-w-0">
-                <SummonerProfile
-                  key={query.data.data.puuid}
-                  response={query.data}
-                />
-                <section
-                  className="mt-4 rounded-[12px] border border-border bg-surface p-5"
-                  aria-label="랭크 요약"
+            <div className="grid gap-5">
+              <SummonerProfile
+                key={query.data.data.puuid}
+                response={query.data}
+              />
+              <section aria-labelledby="season-rank-heading">
+                <h2
+                  id="season-rank-heading"
+                  className="mb-3 text-[14px] font-semibold"
                 >
-                  <h2 className="text-[14px] font-semibold">현재 시즌 랭크</h2>
-                  <p className="mt-2 text-[12px] text-content-muted">
-                    솔로·자유 랭크의 티어와 LP, 승패를 확인할 수 있습니다. 랭크
-                    승률은 시즌 전체 기록을 기준으로 계산합니다.
-                  </p>
-                </section>
-              </div>
+                  현재 시즌 랭크
+                </h2>
+                <div className="grid grid-cols-2 gap-3">
+                  <RankCard
+                    title="솔로 랭크"
+                    rank={query.data.data.ranks.solo}
+                    unavailable={query.data.data.ranks.status === 'unavailable'}
+                    updatedAt={query.data.data.ranks.updatedAt}
+                  />
+                  <RankCard
+                    title="자유 랭크"
+                    rank={query.data.data.ranks.flex}
+                    unavailable={query.data.data.ranks.status === 'unavailable'}
+                    updatedAt={query.data.data.ranks.updatedAt}
+                  />
+                </div>
+              </section>
             </div>
+            <RecentMatches key={query.data.data.puuid} puuid={query.data.data.puuid} />
           </>
         ) : (
           <SummonerError

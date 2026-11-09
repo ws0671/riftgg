@@ -64,7 +64,7 @@ export function readRiotBudgets(
 }
 
 export function createRiotClient(options: {
-  store: SearchStore
+  store: Pick<SearchStore, 'reserveRiot' | 'observeRiot' | 'blockRiot'>
   key: string
   fetcher?: typeof fetch
   deadline: AbortSignal

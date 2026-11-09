@@ -2,3 +2,6 @@ project_id = "riftgg"
 
 [functions.summoner-search]
 verify_jwt = false
+
+[functions.summoner-matches]
+verify_jwt = false

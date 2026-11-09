@@ -118,7 +118,8 @@ describe('search UI', () => {
     expect(
       await screen.findByRole('region', { name: '소환사 검색 결과' }),
     ).toHaveTextContent('한 글#TAG')
-    expect(screen.getByText('KR 서버 · 소환사 레벨 42')).toBeInTheDocument()
+    expect(screen.getByText('KR 서버')).toBeInTheDocument()
+    expect(screen.getByText('소환사 레벨 42')).toBeInTheDocument()
     expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
       platform: 'kr',
       gameName: '한 글',

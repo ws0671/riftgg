@@ -3,10 +3,10 @@ export default function SummonerSkeleton() {
     <div
       role="status"
       aria-label="소환사 검색 중"
-      className="grid grid-cols-[222px_minmax(0,1fr)] gap-6 max-[760px]:grid-cols-[190px_minmax(0,1fr)] max-[540px]:grid-cols-1"
+      className="grid gap-5"
     >
       <div
-        className="grid content-start gap-[14px] max-[540px]:grid-cols-2"
+        className="order-2 grid grid-cols-2 gap-3"
         aria-hidden="true"
       >
         {[0, 1].map((index) => (
